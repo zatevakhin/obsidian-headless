@@ -250,7 +250,15 @@ def search_filename(q: str):
     return matches
 
 
-@click.command()
+@click.group()
+def main():
+    """
+    CLI for Obsidian Headless.
+    """
+    pass
+
+
+@main.command()
 @click.option(
     "--config",
     "-c",
@@ -258,7 +266,7 @@ def search_filename(q: str):
     required=True,
     help="Path to YAML configuration file (contains server.host, server.port, vault.location)",
 )
-def main(config: str):
+def serve(config: str):
     """
     Run the FastAPI server for the Obsidian vault.
     """
