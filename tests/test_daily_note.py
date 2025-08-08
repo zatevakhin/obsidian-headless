@@ -3,12 +3,12 @@ from fastapi.testclient import TestClient
 from pathlib import Path
 import shutil
 from datetime import datetime
-from main import app, VAULT_PATH
+from main import app
+import yaml
 
 # Create a test vault for the tests
 TEST_VAULT_PATH = Path("test_vault_for_daily_note_tests")
 
-import yaml
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_vault():
@@ -62,3 +62,33 @@ def test_get_daily_note_returns_existing_note():
     response = client.get("/api/daily-note")
     assert response.status_code == 200
     assert response.json() == note_content
+
+
+def test_daily_note_template_applied():
+    """Verify that when a template is configured the created daily note contains rendered template content."""
+    import main
+
+    # Configure the daily_note to use the repo-level template we added
+    main.CONFIG = {
+        "daily_note": {
+            "location": "daily_notes/{now:%Y-%m-%d}.md",
+            "template": "templates/daily_note.md.jinja",
+        }
+    }
+    main.VAULT_PATH = TEST_VAULT_PATH
+
+    today = datetime.now()
+    today_str = today.strftime("%Y-%m-%d")
+    note_path = TEST_VAULT_PATH / f"daily_notes/{today_str}.md"
+    if note_path.exists():
+        note_path.unlink()
+
+    response = client.get("/api/daily-note")
+    assert response.status_code == 200
+
+    # File should exist and contain front matter from the template
+    assert note_path.exists()
+    content = note_path.read_text()
+    assert f"title: \"{today_str}\"" in content
+    assert "tags: [daily]" in content
+    assert f"# {today.strftime('%A, %B %d, %Y')}" in content

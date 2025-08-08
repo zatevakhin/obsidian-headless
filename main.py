@@ -8,6 +8,7 @@ import sys
 from datetime import datetime
 
 import yaml
+import jinja2
 from string import Formatter
 
 app = FastAPI()
@@ -44,7 +45,26 @@ def get_daily_note():
 
     full_path.parent.mkdir(parents=True, exist_ok=True)
     if not full_path.is_file():
-        full_path.touch()
+        # If a template is configured, try to render it into the new daily note
+        template_path = CONFIG.get("daily_note", {}).get("template")
+        if template_path:
+            # Respect the configured path exactly. If it's absolute, use it; if
+            # relative, resolve it relative to the repository root (this file's dir).
+            tpl_candidate = Path(template_path)
+            if not tpl_candidate.is_absolute():
+                repo_root = Path(__file__).resolve().parent
+                tpl_candidate = repo_root / template_path
+
+            # Require Jinja2 to be installed; render the template.
+            if tpl_candidate.is_file():
+                tpl_text = tpl_candidate.read_text()
+                rendered = jinja2.Template(tpl_text).render(now=datetime.now())
+                full_path.write_text(rendered)
+            else:
+                # Template path configured but file not found; create empty file
+                full_path.touch()
+        else:
+            full_path.touch()
     return JSONResponse(content=full_path.read_text())
 
 

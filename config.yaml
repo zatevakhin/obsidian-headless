@@ -2,6 +2,7 @@ vault:
   location: "vault"
   daily_note:
     location: "daily/{now:%Y}/{now:%m}/{now:%Y-%m-%d}.md"
+    template: "templates/daily_note.md.jinja"
 
 server:
   host: "localhost"
