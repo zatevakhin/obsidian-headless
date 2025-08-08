@@ -10,12 +10,28 @@ from datetime import datetime
 import yaml
 import jinja2
 from string import Formatter
+from pydantic import BaseModel
+from typing import List
 
 import hashlib
 import tempfile
 import difflib
 
-app = FastAPI()
+app = FastAPI(
+    title="Obsidian Headless API",
+    version="0.1.0",
+    description="Minimal API to read/write/patch files in an Obsidian vault.",
+)
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
+class PatchResponse(BaseModel):
+    message: str
+    etag: str
+
 
 # This will be set from the configuration file
 VAULT_PATH = Path()
@@ -35,7 +51,13 @@ class SafeFormatter(Formatter):
         return super().format_field(value, format_spec)
 
 
-@app.get("/api/daily-note")
+@app.get(
+    "/api/daily-note",
+    response_model=str,
+    status_code=200,
+    tags=["daily"],
+    summary="Get or create today's daily note",
+)
 def get_daily_note():
     # TODO: Add security checks to prevent directory traversal
     location_template = CONFIG.get("daily_note", {}).get(
@@ -72,7 +94,13 @@ def get_daily_note():
     return JSONResponse(content=full_path.read_text())
 
 
-@app.get("/files/{file_path:path}")
+@app.get(
+    "/files/{file_path:path}",
+    response_model=str,
+    status_code=200,
+    tags=["files"],
+    summary="Read file contents",
+)
 def read_file(file_path: str):
     # TODO: Add security checks to prevent directory traversal
     full_path = VAULT_PATH / file_path
@@ -81,7 +109,13 @@ def read_file(file_path: str):
     return JSONResponse(content=full_path.read_text())
 
 
-@app.post("/files/{file_path:path}")
+@app.post(
+    "/files/{file_path:path}",
+    response_model=MessageResponse,
+    status_code=200,
+    tags=["files"],
+    summary="Create a new file",
+)
 async def create_file(file_path: str, request: Request):
     # TODO: Add security checks
     content = await request.body()
@@ -96,7 +130,13 @@ async def create_file(file_path: str, request: Request):
     return {"message": "File created successfully"}
 
 
-@app.put("/files/{file_path:path}")
+@app.put(
+    "/files/{file_path:path}",
+    response_model=MessageResponse,
+    status_code=200,
+    tags=["files"],
+    summary="Replace file contents",
+)
 async def update_file(file_path: str, request: Request):
     # TODO: Add security checks
     # TODO: Add PATCH endpoint with difflib support for partial updates
@@ -108,7 +148,13 @@ async def update_file(file_path: str, request: Request):
     return {"message": "File updated successfully"}
 
 
-@app.patch("/files/{file_path:path}")
+@app.patch(
+    "/files/{file_path:path}",
+    response_model=PatchResponse,
+    status_code=200,
+    tags=["files"],
+    summary="Patch or replace file (ndiff or If-Match)",
+)
 async def patch_file(file_path: str, request: Request):
     # Security: resolve target path and ensure it's inside VAULT_PATH
     resolved = (VAULT_PATH / file_path).resolve()
@@ -159,10 +205,20 @@ async def patch_file(file_path: str, request: Request):
                 pass
 
     new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
-    return JSONResponse(status_code=200, content={"message": "patched", "etag": new_hash}, headers={"ETag": new_hash})
+    return JSONResponse(
+        status_code=200,
+        content={"message": "patched", "etag": new_hash},
+        headers={"ETag": new_hash},
+    )
 
 
-@app.get("/search/content")
+@app.get(
+    "/search/content",
+    response_model=List[str],
+    status_code=200,
+    tags=["search"],
+    summary="Search file content",
+)
 def search_content(q: str):
     # TODO: Add security checks
     matches = []
@@ -176,7 +232,13 @@ def search_content(q: str):
     return matches
 
 
-@app.get("/search/filename")
+@app.get(
+    "/search/filename",
+    response_model=List[str],
+    status_code=200,
+    tags=["search"],
+    summary="Search filenames",
+)
 def search_filename(q: str):
     # TODO: Add security checks
     matches = []
@@ -217,7 +279,9 @@ def main(config: str):
     server_cfg = CONFIG.get("server")
     vault_cfg = CONFIG.get("vault")
     if not server_cfg or not vault_cfg or "location" not in vault_cfg:
-        click.echo("Config file must contain 'server' and 'vault.location' keys", err=True)
+        click.echo(
+            "Config file must contain 'server' and 'vault.location' keys", err=True
+        )
         sys.exit(2)
 
     # Derive server values from config
