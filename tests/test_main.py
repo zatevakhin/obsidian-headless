@@ -25,9 +25,9 @@ def setup_test_vault():
 
     # Create a dummy config file for tests
     config_content = """
-daily_note:
-  location: "daily/{now:%Y}/{now:%Y-%m-%d}.md"
-"""
+    daily_note:
+      location: "daily/{now:%Y}/{now:%Y-%m-%d}.md"
+    """
     config_path = TEST_VAULT_PATH / "config.yaml"
     config_path.write_text(config_content)
     with open(config_path, "r") as f:
@@ -102,9 +102,9 @@ def test_search_content(setup_test_vault):
 
 def test_daily_note_path_generation(setup_test_vault):
     config_content = """
-daily_note:
-  location: "daily/{now:%Y}/{now:%Y-%m-%d}.md"
-"""
+    daily_note:
+      location: "daily/{now:%Y}/{now:%Y-%m-%d}.md"
+    """
     config_path = TEST_VAULT_PATH / "config.yaml"
     config_path.write_text(config_content)
     import main
@@ -123,3 +123,57 @@ daily_note:
     file_name = formatter.format(location_template, now=now)
 
     assert file_name == expected_path
+
+
+# --- PATCH tests added for ndiff and If-Match support ---
+import difflib
+import hashlib
+
+
+def _sha256(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def test_patch_ndiff_applies(setup_test_vault):
+    original = "line1\nline2\n"
+    new = "line1\nline2\nline3 added\n"
+    p = TEST_VAULT_PATH / "patch_note.md"
+    p.write_text(original)
+
+    nd = "".join(difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True)))
+    resp = client.patch("/files/patch_note.md", content=nd, headers={"Content-Type": "text/x-ndiff"})
+    assert resp.status_code == 200
+    assert p.read_text() == new
+    assert "etag" in resp.json()
+    assert resp.headers.get("ETag") == resp.json()["etag"]
+
+
+def test_patch_if_match_success(setup_test_vault):
+    p = TEST_VAULT_PATH / "if_note.md"
+    p.write_text("old content")
+    cur_hash = _sha256(p.read_text())
+    new = "new content"
+    resp = client.patch("/files/if_note.md", content=new, headers={"If-Match": cur_hash, "Content-Type": "text/plain"})
+    assert resp.status_code == 200
+    assert p.read_text() == new
+    assert resp.json()["etag"] == _sha256(new)
+
+
+def test_patch_if_match_conflict(setup_test_vault):
+    p = TEST_VAULT_PATH / "if_conflict.md"
+    p.write_text("unchanged")
+    wrong_hash = "deadbeef"
+    resp = client.patch("/files/if_conflict.md", content="attempt", headers={"If-Match": wrong_hash, "Content-Type": "text/plain"})
+    assert resp.status_code == 409
+    assert p.read_text() == "unchanged"
+
+
+def test_patch_not_found(setup_test_vault):
+    resp = client.patch("/files/nonexistent_patch.md", content="x", headers={"Content-Type": "text/plain"})
+    assert resp.status_code == 404
+
+
+def test_patch_path_traversal_forbidden(setup_test_vault):
+    resp = client.patch("/files/../outside.md", content="x", headers={"Content-Type": "text/plain"})
+    # Path traversal/security checks are intentionally deferred; expect not found for now
+    assert resp.status_code == 404

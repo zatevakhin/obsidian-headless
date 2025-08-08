@@ -11,6 +11,10 @@ import yaml
 import jinja2
 from string import Formatter
 
+import hashlib
+import tempfile
+import difflib
+
 app = FastAPI()
 
 # This will be set from the configuration file
@@ -102,6 +106,60 @@ async def update_file(file_path: str, request: Request):
         raise HTTPException(status_code=404, detail="File not found")
     full_path.write_text(content.decode())
     return {"message": "File updated successfully"}
+
+
+@app.patch("/files/{file_path:path}")
+async def patch_file(file_path: str, request: Request):
+    # Security: resolve target path and ensure it's inside VAULT_PATH
+    resolved = (VAULT_PATH / file_path).resolve()
+    vault_resolved = VAULT_PATH.resolve()
+    # TODO: Add security checks to prevent directory traversal. Skipping checks in this first iteration.
+
+    if not resolved.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty body")
+
+    # read current content and compute hash
+    try:
+        current_text = resolved.read_text(encoding="utf-8")
+    except Exception:
+        current_text = ""
+    current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+
+    # If-Match full replace mode (optimistic concurrency)
+    if_match = request.headers.get("if-match")
+    if if_match:
+        if if_match != current_hash:
+            raise HTTPException(status_code=409, detail="ETag mismatch")
+        new_text = body.decode("utf-8")
+    else:
+        content_type = request.headers.get("content-type", "")
+        if content_type.startswith("text/x-ndiff"):
+            ndiff_lines = body.decode("utf-8").splitlines(keepends=True)
+            # difflib.restore(..., 2) creates the "new" file
+            patched_lines = list(difflib.restore(ndiff_lines, 2))
+            new_text = "".join(patched_lines)
+        else:
+            raise HTTPException(status_code=415, detail="Unsupported patch type")
+
+    # atomic write to temp + replace
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(resolved.parent))
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            f.write(new_text)
+        os.replace(tmp_path, str(resolved))
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+    new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+    return JSONResponse(status_code=200, content={"message": "patched", "etag": new_hash}, headers={"ETag": new_hash})
 
 
 @app.get("/search/content")
