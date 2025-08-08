@@ -1,0 +1,8 @@
+vault:
+  location: "vault"
+  daily_note:
+    location: "daily/{now:%Y}/{now:%m}/{now:%Y-%m-%d}.md"
+
+server:
+  host: "localhost"
+  port: 8080
