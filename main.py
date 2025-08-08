@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pathlib import Path
 import os
+import sys
 from datetime import datetime
 
 import yaml
@@ -11,7 +12,7 @@ from string import Formatter
 
 app = FastAPI()
 
-# This will be set by the CLI command
+# This will be set from the configuration file
 VAULT_PATH = Path()
 CONFIG = {}
 
@@ -110,22 +111,47 @@ def search_filename(q: str):
 
 
 @click.command()
-@click.argument(
-    "vault_dir", type=click.Path(exists=True, file_okay=False, resolve_path=True)
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+    required=True,
+    help="Path to YAML configuration file (contains server.host, server.port, vault.location)",
 )
-@click.option("--host", default="127.0.0.1", help="Host to bind the server to.")
-@click.option("--port", default=8000, help="Port to bind the server to.")
-def main(vault_dir: str, host: str, port: int):
+def main(config: str):
     """
     Run the FastAPI server for the Obsidian vault.
     """
     global VAULT_PATH, CONFIG
-    VAULT_PATH = Path(vault_dir)
 
-    config_path = VAULT_PATH / "config.yaml"
-    if config_path.is_file():
-        with open(config_path, "r") as f:
-            CONFIG = yaml.safe_load(f)
+    # Load configuration only from the explicit path provided via --config
+    if not config or not os.path.isfile(config):
+        click.echo(f"Config file not found: {config}", err=True)
+        sys.exit(2)
+
+    with open(config, "r", encoding="utf-8") as f:
+        CONFIG = yaml.safe_load(f) or {}
+
+    # Normalize daily_note: accept vault.daily_note or top-level daily_note
+    CONFIG.setdefault("daily_note", CONFIG.get("vault", {}).get("daily_note", {}))
+
+    # Validate required sections
+    server_cfg = CONFIG.get("server")
+    vault_cfg = CONFIG.get("vault")
+    if not server_cfg or not vault_cfg or "location" not in vault_cfg:
+        click.echo("Config file must contain 'server' and 'vault.location' keys", err=True)
+        sys.exit(2)
+
+    # Derive server values from config
+    host = server_cfg.get("host")
+    try:
+        port = int(server_cfg.get("port"))
+    except Exception:
+        click.echo("Invalid 'port' in config; must be an integer", err=True)
+        sys.exit(2)
+
+    # Vault path comes from config
+    VAULT_PATH = Path(vault_cfg.get("location"))
 
     click.echo(f"Starting server for vault at: {VAULT_PATH}")
     click.echo(f"API running at: http://{host}:{port}")
