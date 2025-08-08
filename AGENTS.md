@@ -1,8 +1,9 @@
 AGENTS Guide - Behavior, Build, Test, Lint and Style
 
 Agent behavior:
-- Create todo's using todo tools available.
+- Create todo's using structured todo list available as a tool.
 - Be short and concise, don't do things user didn't asked you.
+- If user reject changes you should stop and clarify the reason.
 
 Build / Setup:
 - Development envronment is managed by `nix` `devenv` automatically (agent is landing in prepared envronment).
