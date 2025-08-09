@@ -395,6 +395,78 @@ def search_filename(q: str):
     return matches
 
 
+class TrashRequest(BaseModel):
+    """
+    Request model for trashing or deleting a file.
+    Example: {"path": "some/dir/file.md"}
+    """
+
+    path: str
+
+
+@app.post(
+    "/files/trash",
+    response_model=MessageResponse,
+    status_code=200,
+    tags=["files"],
+    summary="Move a file to the vault's .trash directory",
+)
+async def trash_file(payload: TrashRequest = Body(...)):
+    # Resolve and validate source path
+    try:
+        src = _resolve_safe(Path(payload.path))
+    except HTTPException:
+        raise
+
+    if not src.is_file():
+        logger.warning("Trash called but file not found: %s", src)
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Destination is .trash/<relative path>
+    trash_dir = VAULT_PATH / ".trash"
+    vault_resolved = VAULT_PATH.resolve()
+    dest = trash_dir / src.relative_to(vault_resolved)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Use atomic move
+        src.replace(dest)
+        logger.info("Moved file to trash: %s -> %s", src, dest)
+    except Exception as e:
+        logger.exception("Failed to move file to trash %s: %s", src, e)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    return {"message": "File moved to trash"}
+
+
+@app.delete(
+    "/files",
+    response_model=MessageResponse,
+    status_code=200,
+    tags=["files"],
+    summary="Permanently delete a file from the vault",
+)
+async def delete_file(payload: TrashRequest = Body(...)):
+    # Resolve and validate path
+    try:
+        target = _resolve_safe(Path(payload.path))
+    except HTTPException:
+        raise
+
+    if not target.is_file():
+        logger.warning("Delete called but file not found: %s", target)
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        target.unlink()
+        logger.info("Permanently deleted file: %s", target)
+    except Exception as e:
+        logger.exception("Failed to delete file %s: %s", target, e)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    return {"message": "File permanently deleted"}
+
+
 @click.group()
 def main():
     """

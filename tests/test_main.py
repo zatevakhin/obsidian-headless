@@ -228,3 +228,27 @@ def test_patch_handles_crlf_variants(setup_test_vault):
     assert resp.status_code == 200
     # Normalize to original representation that the server will produce (it writes text as-is)
     assert p.read_text() == new
+
+
+# --- Trash and Delete endpoint tests ---
+def test_trash_file_moves_to_trash(setup_test_vault):
+    p = TEST_VAULT_PATH / "to_trash.md"
+    p.write_text("delete me\n")
+
+    resp = client.post("/files/trash", json={"path": "to_trash.md"})
+    assert resp.status_code == 200
+    # File should no longer exist at original location
+    assert not p.exists()
+    # Should exist under .trash/to_trash.md
+    trash_path = TEST_VAULT_PATH / ".trash" / "to_trash.md"
+    assert trash_path.is_file()
+    assert trash_path.read_text() == "delete me\n"
+
+
+def test_delete_file_permanently_removes(setup_test_vault):
+    p = TEST_VAULT_PATH / "to_delete.md"
+    p.write_text("remove me\n")
+
+    resp = client.request("DELETE", "/files", json={"path": "to_delete.md"})
+    assert resp.status_code == 200
+    assert not p.exists()
