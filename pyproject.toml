@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "obsidian-headless"
+version = "0.1.0"
+description = "Minimal API to read/write/patch files in an Obsidian vault."
+authors = ["Your Name <you@example.com>"]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+fastapi = "*"
+uvicorn = {extras = ["standard"], version = "*"}
+click = "*"
+python-multipart = "*"
+Jinja2 = "*"
+
+[tool.poetry.dev-dependencies]
+pytest = "*"
+requests = "*"
+httpx = "*"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

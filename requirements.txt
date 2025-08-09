@@ -1,8 +1,0 @@
-fastapi
-uvicorn[standard]
-click
-python-multipart
-pytest
-requests
-httpx
-Jinja2
