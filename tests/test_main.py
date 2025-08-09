@@ -64,25 +64,29 @@ def test_read_file_not_found(setup_test_vault):
 
 
 def test_create_file(setup_test_vault):
-    response = client.post("/files/new_note.md", content="This is a new note.")
+    payload = {"file_path": "new_note.md", "content": "This is a new note."}
+    response = client.post("/files", json=payload)
     assert response.status_code == 200
     assert (TEST_VAULT_PATH / "new_note.md").is_file()
     assert (TEST_VAULT_PATH / "new_note.md").read_text() == "This is a new note."
 
 
 def test_create_file_already_exists(setup_test_vault):
-    response = client.post("/files/test_note.md", content="This should fail.")
+    payload = {"file_path": "test_note.md", "content": "This should fail."}
+    response = client.post("/files", json=payload)
     assert response.status_code == 400
 
 
 def test_update_file(setup_test_vault):
-    response = client.put("/files/test_note.md", content="This is an updated note.")
+    payload = {"content": "This is an updated note."}
+    response = client.put("/files/test_note.md", json=payload)
     assert response.status_code == 200
     assert (TEST_VAULT_PATH / "test_note.md").read_text() == "This is an updated note."
 
 
 def test_update_file_not_found(setup_test_vault):
-    response = client.put("/files/non_existent_note.md", content="This should fail.")
+    payload = {"content": "This should fail."}
+    response = client.put("/files/non_existent_note.md", json=payload)
     assert response.status_code == 404
 
 
@@ -140,40 +144,87 @@ def test_patch_ndiff_applies(setup_test_vault):
     p = TEST_VAULT_PATH / "patch_note.md"
     p.write_text(original)
 
-    nd = "".join(difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True)))
-    resp = client.patch("/files/patch_note.md", content=nd, headers={"Content-Type": "text/x-ndiff"})
+    nd = "".join(
+        difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True))
+    )
+    resp = client.patch("/files", json={"file_path": "patch_note.md", "ndiff": nd})
     assert resp.status_code == 200
     assert p.read_text() == new
     assert "etag" in resp.json()
     assert resp.headers.get("ETag") == resp.json()["etag"]
 
 
-def test_patch_if_match_success(setup_test_vault):
+def test_patch_ndiff_applies_without_check(setup_test_vault):
+    original = "old content\n"
+    new = "new content\n"
     p = TEST_VAULT_PATH / "if_note.md"
-    p.write_text("old content")
-    cur_hash = _sha256(p.read_text())
-    new = "new content"
-    resp = client.patch("/files/if_note.md", content=new, headers={"If-Match": cur_hash, "Content-Type": "text/plain"})
+    p.write_text(original)
+    nd = "".join(
+        difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True))
+    )
+    resp = client.patch("/files", json={"file_path": "if_note.md", "ndiff": nd})
     assert resp.status_code == 200
     assert p.read_text() == new
     assert resp.json()["etag"] == _sha256(new)
 
 
-def test_patch_if_match_conflict(setup_test_vault):
-    p = TEST_VAULT_PATH / "if_conflict.md"
-    p.write_text("unchanged")
-    wrong_hash = "deadbeef"
-    resp = client.patch("/files/if_conflict.md", content="attempt", headers={"If-Match": wrong_hash, "Content-Type": "text/plain"})
-    assert resp.status_code == 409
-    assert p.read_text() == "unchanged"
-
-
 def test_patch_not_found(setup_test_vault):
-    resp = client.patch("/files/nonexistent_patch.md", content="x", headers={"Content-Type": "text/plain"})
+    nd = "".join(difflib.ndiff(["x\n"], ["y\n"]))
+    resp = client.patch(
+        "/files", json={"file_path": "nonexistent_patch.md", "ndiff": nd}
+    )
     assert resp.status_code == 404
 
 
 def test_patch_path_traversal_forbidden(setup_test_vault):
-    resp = client.patch("/files/../outside.md", content="x", headers={"Content-Type": "text/plain"})
-    # Path traversal/security checks are intentionally deferred; expect not found for now
-    assert resp.status_code == 404
+    nd = "".join(difflib.ndiff(["x\n"], ["y\n"]))
+    resp = client.patch("/files", json={"file_path": "../outside.md", "ndiff": nd})
+    assert resp.status_code == 400
+
+
+def test_patch_handles_ndiff_without_keepends(setup_test_vault):
+    # Simulate a client that used splitlines() without keepends
+    original = "a\nb\n"
+    new = "a\nb\nc added\n"
+    p = TEST_VAULT_PATH / "no_keepends.md"
+    p.write_text(original)
+
+    # Create ndiff without keepends
+    nd = "".join(difflib.ndiff(original.splitlines(), new.splitlines()))
+    resp = client.patch("/files", json={"file_path": "no_keepends.md", "ndiff": nd})
+    assert resp.status_code == 200
+    assert p.read_text() == new
+
+
+def test_patch_handles_escaped_newlines_and_mixed_payload(setup_test_vault):
+    # Simulate a payload where newlines are escaped (\\n) or mixed with real newlines
+    original = "one\ntwo\n"
+    new = "one\ntwo\nthree added\n"
+    p = TEST_VAULT_PATH / "mixed_escape.md"
+    p.write_text(original)
+
+    # Proper ndiff but then JSON-escaped (simulating a buggy client)
+    proper_nd = "".join(difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True)))
+    escaped_nd = proper_nd.replace('\n', '\\n')
+    # Mix some real newlines back in to simulate a hybrid payload
+    hybrid_nd = escaped_nd.replace('one\\n', 'one\n')
+
+    resp = client.patch("/files", json={"file_path": "mixed_escape.md", "ndiff": hybrid_nd})
+    assert resp.status_code == 200
+    assert p.read_text() == new
+
+
+def test_patch_handles_crlf_variants(setup_test_vault):
+    # Ensure CRLF line endings from Windows clients are handled
+    original = "r1\r\n r2\r\n"
+    # Server normalizes to LF, so expected result uses \n
+    new = "r1\n r2\n r3 added\n"
+    p = TEST_VAULT_PATH / "crlf.md"
+    p.write_text(original)
+
+    nd = "".join(difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True)))
+    # Send ndiff with CRLF sequences intact
+    resp = client.patch("/files", json={"file_path": "crlf.md", "ndiff": nd})
+    assert resp.status_code == 200
+    # Normalize to original representation that the server will produce (it writes text as-is)
+    assert p.read_text() == new

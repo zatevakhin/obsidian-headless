@@ -1,11 +1,12 @@
 import click
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import JSONResponse
 from pathlib import Path
 import os
 import sys
 from datetime import datetime
+import logging
 
 import yaml
 import jinja2
@@ -14,9 +15,7 @@ from pydantic import BaseModel
 from typing import List
 
 import hashlib
-import tempfile
 import difflib
-import logging
 
 app = FastAPI(
     title="Obsidian Headless API",
@@ -38,6 +37,35 @@ class PatchResponse(BaseModel):
     etag: str
 
 
+class CreateFileRequest(BaseModel):
+    """
+    Request model for creating a file. Clients MUST send JSON matching this model.
+    Example: {"file_path": "some/dir/file.md", "content": "..."}
+    """
+
+    file_path: str
+    content: str
+
+
+class UpdateFileRequest(BaseModel):
+    """
+    Request model for replacing file contents.
+    Example: {"content": "..."}
+    """
+
+    content: str
+
+
+class PatchFileRequest(BaseModel):
+    """
+    Request model for patching files. Must provide 'file_path' and 'ndiff'.
+    Example: {"file_path":"notes/today.md", "ndiff": "..."}
+    """
+
+    file_path: str
+    ndiff: str
+
+
 # This will be set from the configuration file
 VAULT_PATH = Path()
 CONFIG = {}
@@ -53,7 +81,27 @@ class SafeFormatter(Formatter):
     def format_field(self, value, format_spec):
         if isinstance(value, datetime):
             return value.strftime(format_spec)
-        return super().format_field(value, format_spec)
+        return super(SafeFormatter, self).format_field(value, format_spec)
+
+
+def _resolve_safe(path: Path) -> Path:
+    """Resolve a candidate path and ensure it remains inside VAULT_PATH.
+
+    Raises HTTPException(400) on traversal attempts.
+    """
+    resolved = (VAULT_PATH / path).resolve()
+    vault_resolved = VAULT_PATH.resolve()
+    try:
+        resolved.relative_to(vault_resolved)
+    except Exception:
+        logger.warning(
+            "Path traversal attempt: %s (resolved=%s, vault=%s)",
+            path,
+            resolved,
+            vault_resolved,
+        )
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    return resolved
 
 
 @app.get(
@@ -129,26 +177,29 @@ def read_file(file_path: str):
 
 
 @app.post(
-    "/files/{file_path:path}",
+    "/files",
     response_model=MessageResponse,
     status_code=200,
     tags=["files"],
     summary="Create a new file",
 )
-async def create_file(file_path: str, request: Request):
-    # TODO: Add security checks
-    content = await request.body()
-    full_path = VAULT_PATH / file_path
+async def create_file(payload: CreateFileRequest = Body(...)):
+    """Create a file from a JSON request model.
 
-    logger.debug("CREATE request for: %s", file_path)
-    logger.debug("Resolved path: %s", str(full_path))
-    logger.debug("Request headers: %s", dict(request.headers))
-    logger.debug("Body length: %d", len(content))
+    The request MUST be application/json and match CreateFileRequest.
+    """
+    # Security: resolve and validate path
     try:
-        preview = content[:512].decode(errors="replace")
-    except Exception:
-        preview = "<binary>"
-    logger.debug("Body preview (first 512 bytes): %s", preview)
+        full_path = _resolve_safe(Path(payload.file_path))
+    except HTTPException:
+        raise
+
+    logger.debug("CREATE request for: %s", payload.file_path)
+    logger.debug("Resolved path: %s", str(full_path))
+
+    if not payload.content:
+        logger.warning("Create called with empty content for: %s", full_path)
+        raise HTTPException(status_code=400, detail="Empty content provided")
 
     if full_path.exists():
         logger.warning("Create called but file exists: %s", full_path)
@@ -158,7 +209,8 @@ async def create_file(file_path: str, request: Request):
     full_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        full_path.write_text(content.decode())
+        # Write text content as UTF-8
+        full_path.write_text(payload.content, encoding="utf-8")
         size = full_path.stat().st_size if full_path.exists() else 0
         logger.info("File created: %s (%d bytes)", full_path, size)
     except Exception as e:
@@ -175,27 +227,21 @@ async def create_file(file_path: str, request: Request):
     tags=["files"],
     summary="Replace file contents",
 )
-async def update_file(file_path: str, request: Request):
-    # TODO: Add security checks
-    # TODO: Add PATCH endpoint with difflib support for partial updates
-    content = await request.body()
-    full_path = VAULT_PATH / file_path
+async def update_file(file_path: str, payload: UpdateFileRequest = Body(...)):
+    # Security: resolve and validate path
+    try:
+        full_path = _resolve_safe(Path(file_path))
+    except HTTPException:
+        raise
 
     logger.debug("UPDATE request for: %s", file_path)
     logger.debug("Resolved path: %s", str(full_path))
-    logger.debug("Request headers: %s", dict(request.headers))
-    logger.debug("Body length: %d", len(content))
-    try:
-        preview = content[:512].decode(errors="replace")
-    except Exception:
-        preview = "<binary>"
-    logger.debug("Body preview (first 512 bytes): %s", preview)
 
     if not full_path.is_file():
         logger.warning("Update called but file not found: %s", full_path)
         raise HTTPException(status_code=404, detail="File not found")
     try:
-        full_path.write_text(content.decode())
+        full_path.write_text(payload.content, encoding="utf-8")
         size = full_path.stat().st_size if full_path.exists() else 0
         logger.info("File updated: %s (%d bytes)", full_path, size)
     except Exception as e:
@@ -205,97 +251,84 @@ async def update_file(file_path: str, request: Request):
 
 
 @app.patch(
-    "/files/{file_path:path}",
+    "/files",
     response_model=PatchResponse,
     status_code=200,
     tags=["files"],
-    summary="Patch or replace file (ndiff or If-Match)",
+    summary="Patch file with ndiff",
 )
-async def patch_file(file_path: str, request: Request):
-    # Security: resolve target path and ensure it's inside VAULT_PATH
-    resolved = (VAULT_PATH / file_path).resolve()
-    vault_resolved = VAULT_PATH.resolve()
-    # TODO: Add security checks to prevent directory traversal. Skipping checks in this first iteration.
+async def patch_file(payload: PatchFileRequest = Body(...)):
+    file_path = payload.file_path
+
+    try:
+        resolved = _resolve_safe(Path(file_path))
+    except HTTPException:
+        raise
 
     logger.debug("PATCH request for: %s", file_path)
     logger.debug("Resolved path: %s", str(resolved))
-    logger.debug("Request headers: %s", dict(request.headers))
 
     if not resolved.is_file():
         logger.warning("Patch called but file not found: %s", resolved)
         raise HTTPException(status_code=404, detail="File not found")
 
-    body = await request.body()
-    logger.debug("Patch body length: %d", len(body))
+    ndiff_text = payload.ndiff
+    if not ndiff_text:
+        logger.warning("Empty ndiff in patch payload for: %s", resolved)
+        raise HTTPException(status_code=400, detail="Empty ndiff")
+
+    # Normalize CRLF to LF in the ndiff payload first
+    ndiff_text = ndiff_text.replace("\r\n", "\n")
+
+    # Handle common client-side serialization issues:
+    # - Some clients JSON-escape newlines ("\\n") producing literal backslash-n sequences.
+    # - Normalize escaped newline sequences first so hybrid payloads are handled.
     try:
-        preview = body[:512].decode(errors="replace")
+        if "\\n" in ndiff_text:
+            ndiff_text = ndiff_text.replace("\\n", "\n")
     except Exception:
-        preview = "<binary>"
-    logger.debug("Patch body preview: %s", preview)
+        logger.debug("Failed to replace escaped newlines; proceeding with original text")
 
-    if not body:
-        logger.warning("Empty body for patch on: %s", resolved)
-        raise HTTPException(status_code=400, detail="Empty body")
+    # If there are still no real newlines, try inserting newlines before diff markers
+    if "\n" not in ndiff_text:
+        # Simple marker-based splitting without regex: insert newlines before diff markers
+        # Handle double-space marker first to avoid interfering with other markers
+        spaced = ndiff_text.replace("  ", "\n  ")
+        spaced = spaced.replace("+ ", "\n+ ")
+        spaced = spaced.replace("- ", "\n- ")
+        spaced = spaced.replace("? ", "\n? ")
+        spaced = spaced.lstrip("\n")
+        ndiff_text = spaced
 
-    # read current content and compute hash
+    ndiff_lines = ndiff_text.splitlines(keepends=True)
+    # Ensure each ndiff line ends with a newline to satisfy difflib.restore expectations
+    ndiff_lines = [ln if ln.endswith("\n") else ln + "\n" for ln in ndiff_lines]
+
     try:
-        current_text = resolved.read_text(encoding="utf-8")
-    except Exception:
-        current_text = ""
-    current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
-
-    # If-Match full replace mode (optimistic concurrency)
-    if_match = request.headers.get("if-match")
-    if if_match:
-        if if_match != current_hash:
-            logger.warning("ETag mismatch for %s (expected=%s, got=%s)", resolved, current_hash, if_match)
-            raise HTTPException(status_code=409, detail="ETag mismatch")
-        new_text = body.decode("utf-8")
-    else:
-        content_type = request.headers.get("content-type", "")
-        if content_type.startswith("text/x-ndiff"):
-            ndiff_lines = body.decode("utf-8").splitlines(keepends=True)
-            # difflib.restore(..., 2) creates the "new" file
-            patched_lines = list(difflib.restore(ndiff_lines, 2))
-            new_text = "".join(patched_lines)
-        else:
-            logger.warning("Unsupported patch type for %s: %s", resolved, content_type)
-            raise HTTPException(status_code=415, detail="Unsupported patch type")
+        patched_lines = list(difflib.restore(ndiff_lines, 2))
+        # Ensure restored text uses LF line endings
+        new_text = "".join(patched_lines).replace("\r\n", "\n")
+    except Exception as e:
+        logger.warning("Invalid ndiff format: %s", e)
+        raise HTTPException(status_code=400, detail="Invalid ndiff format")
 
     logger.debug("New text length: %d", len(new_text))
     try:
         preview_new = new_text[:512]
     except Exception:
-        preview_new = "<binary>"
+        preview_new = "<non-text>"
     logger.debug("New text preview: %s", preview_new)
 
-    # atomic write to temp + replace
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(resolved.parent))
+    # Simplified write (no atomic tempfile handling) - assuming single client
     try:
-        try:
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                f.write(new_text)
-            os.replace(tmp_path, str(resolved))
-            logger.info("Patched file: %s", resolved)
-        except Exception as e:
-            logger.exception("Failed to write/replace temp file for %s: %s", resolved, e)
-            # cleanup and raise
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-            raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+        resolved.write_text(new_text, encoding="utf-8")
+        logger.info("Patched file (direct write): %s", resolved)
+    except Exception as e:
+        logger.exception("Failed to write file %s: %s", resolved, e)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
     return JSONResponse(
-        status_code=200,
         content={"message": "patched", "etag": new_hash},
         headers={"ETag": new_hash},
     )
@@ -364,7 +397,9 @@ def main():
 @click.option(
     "--log-level",
     default="INFO",
-    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], case_sensitive=True),
+    type=click.Choice(
+        ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], case_sensitive=True
+    ),
     help="Logging level",
 )
 def serve(config: str, log_file: str | None, log_level: str):
