@@ -16,12 +16,17 @@ from typing import List
 import hashlib
 import tempfile
 import difflib
+import logging
 
 app = FastAPI(
     title="Obsidian Headless API",
     version="0.1.0",
     description="Minimal API to read/write/patch files in an Obsidian vault.",
 )
+
+
+# Module logger; configured in serve()
+logger = logging.getLogger("obsidian")
 
 
 class MessageResponse(BaseModel):
@@ -91,7 +96,15 @@ def get_daily_note():
                 full_path.touch()
         else:
             full_path.touch()
-    return JSONResponse(content=full_path.read_text())
+
+    try:
+        text = full_path.read_text()
+        logger.info("Read daily note: %s (size=%d)", full_path, len(text))
+    except Exception:
+        logger.exception("Failed to read daily note: %s", full_path)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    return JSONResponse(content=text)
 
 
 @app.get(
@@ -106,7 +119,13 @@ def read_file(file_path: str):
     full_path = VAULT_PATH / file_path
     if not full_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    return JSONResponse(content=full_path.read_text())
+    try:
+        text = full_path.read_text()
+        logger.info("Read file: %s (size=%d)", full_path, len(text))
+    except Exception:
+        logger.exception("Failed to read file: %s", full_path)
+        raise HTTPException(status_code=500, detail="Internal server error")
+    return JSONResponse(content=text)
 
 
 @app.post(
@@ -120,13 +139,32 @@ async def create_file(file_path: str, request: Request):
     # TODO: Add security checks
     content = await request.body()
     full_path = VAULT_PATH / file_path
+
+    logger.debug("CREATE request for: %s", file_path)
+    logger.debug("Resolved path: %s", str(full_path))
+    logger.debug("Request headers: %s", dict(request.headers))
+    logger.debug("Body length: %d", len(content))
+    try:
+        preview = content[:512].decode(errors="replace")
+    except Exception:
+        preview = "<binary>"
+    logger.debug("Body preview (first 512 bytes): %s", preview)
+
     if full_path.exists():
+        logger.warning("Create called but file exists: %s", full_path)
         raise HTTPException(status_code=400, detail="File already exists")
 
     # Create parent directories if they don't exist
     full_path.parent.mkdir(parents=True, exist_ok=True)
 
-    full_path.write_text(content.decode())
+    try:
+        full_path.write_text(content.decode())
+        size = full_path.stat().st_size if full_path.exists() else 0
+        logger.info("File created: %s (%d bytes)", full_path, size)
+    except Exception as e:
+        logger.exception("Failed to write file %s: %s", full_path, e)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
     return {"message": "File created successfully"}
 
 
@@ -142,9 +180,27 @@ async def update_file(file_path: str, request: Request):
     # TODO: Add PATCH endpoint with difflib support for partial updates
     content = await request.body()
     full_path = VAULT_PATH / file_path
+
+    logger.debug("UPDATE request for: %s", file_path)
+    logger.debug("Resolved path: %s", str(full_path))
+    logger.debug("Request headers: %s", dict(request.headers))
+    logger.debug("Body length: %d", len(content))
+    try:
+        preview = content[:512].decode(errors="replace")
+    except Exception:
+        preview = "<binary>"
+    logger.debug("Body preview (first 512 bytes): %s", preview)
+
     if not full_path.is_file():
+        logger.warning("Update called but file not found: %s", full_path)
         raise HTTPException(status_code=404, detail="File not found")
-    full_path.write_text(content.decode())
+    try:
+        full_path.write_text(content.decode())
+        size = full_path.stat().st_size if full_path.exists() else 0
+        logger.info("File updated: %s (%d bytes)", full_path, size)
+    except Exception as e:
+        logger.exception("Failed to update file %s: %s", full_path, e)
+        raise HTTPException(status_code=500, detail="Internal server error")
     return {"message": "File updated successfully"}
 
 
@@ -161,11 +217,24 @@ async def patch_file(file_path: str, request: Request):
     vault_resolved = VAULT_PATH.resolve()
     # TODO: Add security checks to prevent directory traversal. Skipping checks in this first iteration.
 
+    logger.debug("PATCH request for: %s", file_path)
+    logger.debug("Resolved path: %s", str(resolved))
+    logger.debug("Request headers: %s", dict(request.headers))
+
     if not resolved.is_file():
+        logger.warning("Patch called but file not found: %s", resolved)
         raise HTTPException(status_code=404, detail="File not found")
 
     body = await request.body()
+    logger.debug("Patch body length: %d", len(body))
+    try:
+        preview = body[:512].decode(errors="replace")
+    except Exception:
+        preview = "<binary>"
+    logger.debug("Patch body preview: %s", preview)
+
     if not body:
+        logger.warning("Empty body for patch on: %s", resolved)
         raise HTTPException(status_code=400, detail="Empty body")
 
     # read current content and compute hash
@@ -179,6 +248,7 @@ async def patch_file(file_path: str, request: Request):
     if_match = request.headers.get("if-match")
     if if_match:
         if if_match != current_hash:
+            logger.warning("ETag mismatch for %s (expected=%s, got=%s)", resolved, current_hash, if_match)
             raise HTTPException(status_code=409, detail="ETag mismatch")
         new_text = body.decode("utf-8")
     else:
@@ -189,14 +259,33 @@ async def patch_file(file_path: str, request: Request):
             patched_lines = list(difflib.restore(ndiff_lines, 2))
             new_text = "".join(patched_lines)
         else:
+            logger.warning("Unsupported patch type for %s: %s", resolved, content_type)
             raise HTTPException(status_code=415, detail="Unsupported patch type")
+
+    logger.debug("New text length: %d", len(new_text))
+    try:
+        preview_new = new_text[:512]
+    except Exception:
+        preview_new = "<binary>"
+    logger.debug("New text preview: %s", preview_new)
 
     # atomic write to temp + replace
     tmp_fd, tmp_path = tempfile.mkstemp(dir=str(resolved.parent))
     try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            f.write(new_text)
-        os.replace(tmp_path, str(resolved))
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                f.write(new_text)
+            os.replace(tmp_path, str(resolved))
+            logger.info("Patched file: %s", resolved)
+        except Exception as e:
+            logger.exception("Failed to write/replace temp file for %s: %s", resolved, e)
+            # cleanup and raise
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         if os.path.exists(tmp_path):
             try:
@@ -266,7 +355,19 @@ def main():
     required=True,
     help="Path to YAML configuration file (contains server.host, server.port, vault.location)",
 )
-def serve(config: str):
+@click.option(
+    "--log-file",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Optional path to write logs to",
+)
+@click.option(
+    "--log-level",
+    default="INFO",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], case_sensitive=True),
+    help="Logging level",
+)
+def serve(config: str, log_file: str | None, log_level: str):
     """
     Run the FastAPI server for the Obsidian vault.
     """
@@ -303,10 +404,128 @@ def serve(config: str):
     # Vault path comes from config
     VAULT_PATH = Path(vault_cfg.get("location"))
 
+    # Configure logging
+    numeric_level = getattr(logging, log_level.upper(), logging.INFO)
+    logger.setLevel(numeric_level)
+    # Console handler
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(numeric_level)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
+    # Optional file handler
+    if log_file:
+        try:
+            fh = logging.FileHandler(log_file, encoding="utf-8")
+            fh.setLevel(numeric_level)
+            fh.setFormatter(fmt)
+            logger.addHandler(fh)
+        except Exception:
+            click.echo(f"Failed to open log file: {log_file}", err=True)
+            sys.exit(2)
+
+    logger.info("Logging configured (level=%s, file=%s)", log_level, log_file)
+
     click.echo(f"Starting server for vault at: {VAULT_PATH}")
     click.echo(f"API running at: http://{host}:{port}")
 
     uvicorn.run(app, host=host, port=port)
+
+
+@main.command()
+@click.option(
+    "--spec",
+    "-s",
+    required=True,
+    help="OpenAPI spec URL or local file (http(s):// or path)",
+)
+@click.option(
+    "--base-url",
+    "-b",
+    default=None,
+    help="Base URL for the API (optional)",
+)
+@click.option(
+    "--name",
+    default="OpenAPI MCP Server",
+    help="Name for the MCP server",
+)
+@click.option(
+    "--sse",
+    is_flag=True,
+    default=False,
+    help="Use SSE transport. If not set, STDIO is used.",
+)
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    help="Host to bind when using SSE transport",
+)
+@click.option(
+    "--port",
+    default=8000,
+    type=int,
+    help="Port to bind when using SSE transport",
+)
+def mcp(spec: str, base_url: str | None, name: str, sse: bool, host: str, port: int):
+    """Create and run a FastMCP server from an OpenAPI spec (basic example).
+
+    This implements the minimal example from the FastMCP OpenAPI docs:
+    - Load the OpenAPI spec (URL or local file)
+    - Create an httpx.AsyncClient
+    - Call FastMCP.from_openapi(...)
+    - Run the MCP server using STDIO (default) or SSE (when --sse is provided)
+    """
+    try:
+        import json as _json
+        import httpx as _httpx
+        from fastmcp import FastMCP as _FastMCP
+    except Exception:
+        click.echo(
+            "fastmcp and httpx are required. Install with: pip install fastmcp httpx",
+            err=True,
+        )
+        sys.exit(2)
+
+    # Load the OpenAPI spec from URL or local file
+    if spec.startswith("http://") or spec.startswith("https://"):
+        try:
+            r = _httpx.get(spec)
+            r.raise_for_status()
+            openapi_spec = r.json()
+        except Exception as e:
+            click.echo(f"Failed to download or parse spec: {e}", err=True)
+            sys.exit(2)
+    else:
+        try:
+            with open(spec, "r", encoding="utf-8") as f:
+                openapi_spec = _json.load(f)
+        except Exception as e:
+            click.echo(f"Failed to read or parse spec file: {e}", err=True)
+            sys.exit(2)
+
+    # Create async httpx client (use base_url if provided)
+    client = _httpx.AsyncClient(base_url=base_url) if base_url else _httpx.AsyncClient()
+
+    # Create the MCP server from the OpenAPI spec
+    try:
+        mcp = _FastMCP.from_openapi(openapi_spec=openapi_spec, client=client, name=name)
+    except Exception as e:
+        click.echo(f"Failed to create FastMCP server: {e}", err=True)
+        sys.exit(2)
+
+    click.echo("Starting FastMCP server...")
+    # Run the server (blocking). By default use STDIO; if --sse was passed, use SSE transport
+    try:
+        if sse:
+            click.echo(f"Using SSE transport on {host}:{port}")
+            mcp.run(transport="sse", host=host, port=port)
+        else:
+            click.echo("Using STDIO transport (default)")
+            mcp.run(transport="stdio")
+    except Exception as e:
+        click.echo(f"Failed to run FastMCP server: {e}", err=True)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

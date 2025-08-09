@@ -11,6 +11,8 @@ uvicorn = {extras = ["standard"], version = "*"}
 click = "*"
 python-multipart = "*"
 Jinja2 = "*"
+httpx = "*"
+fastmcp = "*"
 
 [tool.poetry.dev-dependencies]
 pytest = "*"
