@@ -1,7 +1,7 @@
 AGENTS Guide - Behavior, Build, Test, Lint and Style
 
 Agent behavior:
-- Create todo's using structured todo list available as a tool.
+- Create todo's using tools for planning.
 - Be short and concise, don't do things user didn't asked you.
 - If user reject changes you should stop and clarify the reason.
 - Avoid adding useless comments into code if code is self descripting enough.
