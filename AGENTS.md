@@ -4,6 +4,7 @@ Agent behavior:
 - Create todo's using structured todo list available as a tool.
 - Be short and concise, don't do things user didn't asked you.
 - If user reject changes you should stop and clarify the reason.
+- Avoid adding useless comments into code if code is self descripting enough.
 
 Build / Setup:
 - Development envronment is managed by `nix` `devenv` automatically (agent is landing in prepared envronment).
