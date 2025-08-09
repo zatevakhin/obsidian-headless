@@ -48,7 +48,10 @@ def test_get_daily_note_creates_new_note():
 
     response = client.get("/api/daily-note")
     assert response.status_code == 200
-    assert response.json() == ""  # New note should be empty
+    data = response.json()
+    assert isinstance(data, dict)
+    assert data.get("content") == ""  # New note should be empty
+    assert data.get("path") == str(note_path.relative_to(TEST_VAULT_PATH))
     assert note_path.exists()
 
 
@@ -61,7 +64,10 @@ def test_get_daily_note_returns_existing_note():
 
     response = client.get("/api/daily-note")
     assert response.status_code == 200
-    assert response.json() == note_content
+    data = response.json()
+    assert isinstance(data, dict)
+    assert data.get("content") == note_content
+    assert data.get("path") == str(note_path.relative_to(TEST_VAULT_PATH))
 
 
 def test_daily_note_template_applied():

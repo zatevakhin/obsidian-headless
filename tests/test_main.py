@@ -47,24 +47,24 @@ client = TestClient(app)
 
 
 def test_read_file(setup_test_vault):
-    response = client.get("/files/test_note.md")
+    response = client.request("GET", "/files", json={"path": "test_note.md"})
     assert response.status_code == 200
     assert response.json() == "This is a test note."
 
 
 def test_read_nested_file(setup_test_vault):
-    response = client.get("/files/folder/nested_note.md")
+    response = client.request("GET", "/files", json={"path": "folder/nested_note.md"})
     assert response.status_code == 200
     assert response.json() == "This is a nested note."
 
 
 def test_read_file_not_found(setup_test_vault):
-    response = client.get("/files/non_existent_note.md")
+    response = client.request("GET", "/files", json={"path": "non_existent_note.md"})
     assert response.status_code == 404
 
 
 def test_create_file(setup_test_vault):
-    payload = {"file_path": "new_note.md", "content": "This is a new note."}
+    payload = {"path": "new_note.md", "content": "This is a new note."}
     response = client.post("/files", json=payload)
     assert response.status_code == 200
     assert (TEST_VAULT_PATH / "new_note.md").is_file()
@@ -72,21 +72,21 @@ def test_create_file(setup_test_vault):
 
 
 def test_create_file_already_exists(setup_test_vault):
-    payload = {"file_path": "test_note.md", "content": "This should fail."}
+    payload = {"path": "test_note.md", "content": "This should fail."}
     response = client.post("/files", json=payload)
     assert response.status_code == 400
 
 
 def test_update_file(setup_test_vault):
-    payload = {"content": "This is an updated note."}
-    response = client.put("/files/test_note.md", json=payload)
+    payload = {"path": "test_note.md", "content": "This is an updated note."}
+    response = client.put("/files", json=payload)
     assert response.status_code == 200
     assert (TEST_VAULT_PATH / "test_note.md").read_text() == "This is an updated note."
 
 
 def test_update_file_not_found(setup_test_vault):
-    payload = {"content": "This should fail."}
-    response = client.put("/files/non_existent_note.md", json=payload)
+    payload = {"path": "non_existent_note.md", "content": "This should fail."}
+    response = client.put("/files", json=payload)
     assert response.status_code == 404
 
 
@@ -147,7 +147,7 @@ def test_patch_ndiff_applies(setup_test_vault):
     nd = "".join(
         difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True))
     )
-    resp = client.patch("/files", json={"file_path": "patch_note.md", "ndiff": nd})
+    resp = client.patch("/files", json={"path": "patch_note.md", "ndiff": nd})
     assert resp.status_code == 200
     assert p.read_text() == new
     assert "etag" in resp.json()
@@ -162,7 +162,7 @@ def test_patch_ndiff_applies_without_check(setup_test_vault):
     nd = "".join(
         difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True))
     )
-    resp = client.patch("/files", json={"file_path": "if_note.md", "ndiff": nd})
+    resp = client.patch("/files", json={"path": "if_note.md", "ndiff": nd})
     assert resp.status_code == 200
     assert p.read_text() == new
     assert resp.json()["etag"] == _sha256(new)
@@ -171,14 +171,14 @@ def test_patch_ndiff_applies_without_check(setup_test_vault):
 def test_patch_not_found(setup_test_vault):
     nd = "".join(difflib.ndiff(["x\n"], ["y\n"]))
     resp = client.patch(
-        "/files", json={"file_path": "nonexistent_patch.md", "ndiff": nd}
+        "/files", json={"path": "nonexistent_patch.md", "ndiff": nd}
     )
     assert resp.status_code == 404
 
 
 def test_patch_path_traversal_forbidden(setup_test_vault):
     nd = "".join(difflib.ndiff(["x\n"], ["y\n"]))
-    resp = client.patch("/files", json={"file_path": "../outside.md", "ndiff": nd})
+    resp = client.patch("/files", json={"path": "../outside.md", "ndiff": nd})
     assert resp.status_code == 400
 
 
@@ -191,7 +191,7 @@ def test_patch_handles_ndiff_without_keepends(setup_test_vault):
 
     # Create ndiff without keepends
     nd = "".join(difflib.ndiff(original.splitlines(), new.splitlines()))
-    resp = client.patch("/files", json={"file_path": "no_keepends.md", "ndiff": nd})
+    resp = client.patch("/files", json={"path": "no_keepends.md", "ndiff": nd})
     assert resp.status_code == 200
     assert p.read_text() == new
 
@@ -209,7 +209,7 @@ def test_patch_handles_escaped_newlines_and_mixed_payload(setup_test_vault):
     # Mix some real newlines back in to simulate a hybrid payload
     hybrid_nd = escaped_nd.replace('one\\n', 'one\n')
 
-    resp = client.patch("/files", json={"file_path": "mixed_escape.md", "ndiff": hybrid_nd})
+    resp = client.patch("/files", json={"path": "mixed_escape.md", "ndiff": hybrid_nd})
     assert resp.status_code == 200
     assert p.read_text() == new
 
@@ -224,7 +224,7 @@ def test_patch_handles_crlf_variants(setup_test_vault):
 
     nd = "".join(difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True)))
     # Send ndiff with CRLF sequences intact
-    resp = client.patch("/files", json={"file_path": "crlf.md", "ndiff": nd})
+    resp = client.patch("/files", json={"path": "crlf.md", "ndiff": nd})
     assert resp.status_code == 200
     # Normalize to original representation that the server will produce (it writes text as-is)
     assert p.read_text() == new

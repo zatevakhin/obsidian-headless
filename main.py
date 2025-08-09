@@ -37,32 +37,47 @@ class PatchResponse(BaseModel):
     etag: str
 
 
+class DailyNoteResponse(BaseModel):
+    content: str
+    path: str
+
+
+class ReadFileRequest(BaseModel):
+    """
+    Request model for reading a file.
+    Example: {"path": "some/dir/file.md"}
+    """
+
+    path: str
+
+
 class CreateFileRequest(BaseModel):
     """
     Request model for creating a file. Clients MUST send JSON matching this model.
-    Example: {"file_path": "some/dir/file.md", "content": "..."}
+    Example: {"path": "some/dir/file.md", "content": "..."}
     """
 
-    file_path: str
+    path: str
     content: str
 
 
 class UpdateFileRequest(BaseModel):
     """
     Request model for replacing file contents.
-    Example: {"content": "..."}
+    Example: {"path": "some/dir/file.md", "content": "..."}
     """
 
+    path: str
     content: str
 
 
 class PatchFileRequest(BaseModel):
     """
     Request model for patching files. Must provide 'file_path' and 'ndiff'.
-    Example: {"file_path":"notes/today.md", "ndiff": "..."}
+    Example: {"path":"notes/today.md", "ndiff": "..."}
     """
 
-    file_path: str
+    path: str
     ndiff: str
 
 
@@ -106,7 +121,7 @@ def _resolve_safe(path: Path) -> Path:
 
 @app.get(
     "/api/daily-note",
-    response_model=str,
+    response_model=DailyNoteResponse,
     status_code=200,
     tags=["daily"],
     summary="Get or create today's daily note",
@@ -152,19 +167,24 @@ def get_daily_note():
         logger.exception("Failed to read daily note: %s", full_path)
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    return JSONResponse(content=text)
+    # Return both content and path (relative to vault)
+    rel_path = str(full_path.relative_to(VAULT_PATH))
+    return JSONResponse(content={"content": text, "path": rel_path})
 
 
 @app.get(
-    "/files/{file_path:path}",
+    "/files",
     response_model=str,
     status_code=200,
     tags=["files"],
     summary="Read file contents",
 )
-def read_file(file_path: str):
-    # TODO: Add security checks to prevent directory traversal
-    full_path = VAULT_PATH / file_path
+def read_file(payload: ReadFileRequest = Body(...)):
+    # Security: resolve and validate path
+    try:
+        full_path = _resolve_safe(Path(payload.path))
+    except HTTPException:
+        raise
     if not full_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     try:
@@ -174,6 +194,7 @@ def read_file(file_path: str):
         logger.exception("Failed to read file: %s", full_path)
         raise HTTPException(status_code=500, detail="Internal server error")
     return JSONResponse(content=text)
+
 
 
 @app.post(
@@ -190,11 +211,11 @@ async def create_file(payload: CreateFileRequest = Body(...)):
     """
     # Security: resolve and validate path
     try:
-        full_path = _resolve_safe(Path(payload.file_path))
+        full_path = _resolve_safe(Path(payload.path))
     except HTTPException:
         raise
 
-    logger.debug("CREATE request for: %s", payload.file_path)
+    logger.debug("CREATE request for: %s", payload.path)
     logger.debug("Resolved path: %s", str(full_path))
 
     if not payload.content:
@@ -221,20 +242,20 @@ async def create_file(payload: CreateFileRequest = Body(...)):
 
 
 @app.put(
-    "/files/{file_path:path}",
+    "/files",
     response_model=MessageResponse,
     status_code=200,
     tags=["files"],
     summary="Replace file contents",
 )
-async def update_file(file_path: str, payload: UpdateFileRequest = Body(...)):
+async def update_file(payload: UpdateFileRequest = Body(...)):
     # Security: resolve and validate path
     try:
-        full_path = _resolve_safe(Path(file_path))
+        full_path = _resolve_safe(Path(payload.path))
     except HTTPException:
         raise
 
-    logger.debug("UPDATE request for: %s", file_path)
+    logger.debug("UPDATE request for: %s", payload.path)
     logger.debug("Resolved path: %s", str(full_path))
 
     if not full_path.is_file():
@@ -258,7 +279,7 @@ async def update_file(file_path: str, payload: UpdateFileRequest = Body(...)):
     summary="Patch file with ndiff",
 )
 async def patch_file(payload: PatchFileRequest = Body(...)):
-    file_path = payload.file_path
+    file_path = payload.path
 
     try:
         resolved = _resolve_safe(Path(file_path))
@@ -287,7 +308,9 @@ async def patch_file(payload: PatchFileRequest = Body(...)):
         if "\\n" in ndiff_text:
             ndiff_text = ndiff_text.replace("\\n", "\n")
     except Exception:
-        logger.debug("Failed to replace escaped newlines; proceeding with original text")
+        logger.debug(
+            "Failed to replace escaped newlines; proceeding with original text"
+        )
 
     # If there are still no real newlines, try inserting newlines before diff markers
     if "\n" not in ndiff_text:
@@ -544,7 +567,20 @@ def mcp(spec: str, base_url: str | None, name: str, sse: bool, host: str, port: 
 
     # Create the MCP server from the OpenAPI spec
     try:
-        mcp = _FastMCP.from_openapi(openapi_spec=openapi_spec, client=client, name=name)
+        mcp = _FastMCP.from_openapi(
+            openapi_spec=openapi_spec,
+            client=client,
+            name=name,
+            mcp_names={
+                "get_daily_note_api_daily_note_get": "daily_note",
+                "read_file_files": "read_file",
+                "update_file_files": "update_file",
+                "create_file_files_post": "create_file",
+                "patch_file_files_patch": "patch_file",
+                "search_content_search_content_get": "search_content",
+                "search_filename_search_filename_get": "search_filename",
+            },
+        )
     except Exception as e:
         click.echo(f"Failed to create FastMCP server: {e}", err=True)
         sys.exit(2)
