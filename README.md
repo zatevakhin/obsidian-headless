@@ -21,6 +21,12 @@ pip install -e .
 obsidian-headless serve -c path/to/config.yaml
 ```
 
+You can also run the server directly from the repo using uvx (useful for quickly trying the project without installing):
+
+```bash
+uvx https://github.com/zatevakhin/obsidian-headless.git --help
+```
+
    The config must include 'server' and 'vault.location' keys. Example:
 
 ```yaml
