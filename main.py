@@ -89,7 +89,6 @@ CONFIG = {}
 
 class SafeFormatter(Formatter):
     def get_field(self, field_name, args, kwargs):
-        # Allow access to 'now'
         if field_name == "now":
             return datetime.now(), field_name
         raise ValueError(f"Invalid field name: {field_name}")
@@ -128,7 +127,6 @@ def _resolve_safe(path: Path) -> Path:
     summary="Get or create today's daily note",
 )
 def get_daily_note():
-    # TODO: Add security checks to prevent directory traversal
     location_template = CONFIG.get("daily_note", {}).get(
         "location", "daily/{now:%Y}/{now:%Y-%m-%d}.md"
     )
@@ -140,23 +138,18 @@ def get_daily_note():
 
     full_path.parent.mkdir(parents=True, exist_ok=True)
     if not full_path.is_file():
-        # If a template is configured, try to render it into the new daily note
         template_path = CONFIG.get("daily_note", {}).get("template")
         if template_path:
-            # Respect the configured path exactly. If it's absolute, use it; if
-            # relative, resolve it relative to the repository root (this file's dir).
             tpl_candidate = Path(template_path)
             if not tpl_candidate.is_absolute():
                 repo_root = Path(__file__).resolve().parent
                 tpl_candidate = repo_root / template_path
 
-            # Require Jinja2 to be installed; render the template.
             if tpl_candidate.is_file():
                 tpl_text = tpl_candidate.read_text()
                 rendered = jinja2.Template(tpl_text).render(now=datetime.now())
                 full_path.write_text(rendered)
             else:
-                # Template path configured but file not found; create empty file
                 full_path.touch()
         else:
             full_path.touch()
@@ -168,7 +161,6 @@ def get_daily_note():
         logger.exception("Failed to read daily note: %s", full_path)
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    # Return both content and path (relative to vault)
     rel_path = str(full_path.relative_to(VAULT_PATH))
     return JSONResponse(content={"content": text, "path": rel_path})
 
@@ -181,7 +173,6 @@ def get_daily_note():
     summary="Read file contents",
 )
 def read_file(payload: ReadFileRequest = Body(...)):
-    # Security: resolve and validate path
     try:
         full_path = _resolve_safe(Path(payload.path))
     except HTTPException:
@@ -209,7 +200,6 @@ async def create_file(payload: CreateFileRequest = Body(...)):
 
     The request MUST be application/json and match CreateFileRequest.
     """
-    # Security: resolve and validate path
     try:
         full_path = _resolve_safe(Path(payload.path))
     except HTTPException:
@@ -226,11 +216,9 @@ async def create_file(payload: CreateFileRequest = Body(...)):
         logger.warning("Create called but file exists: %s", full_path)
         raise HTTPException(status_code=400, detail="File already exists")
 
-    # Create parent directories if they don't exist
     full_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Write text content as UTF-8
         full_path.write_text(payload.content, encoding="utf-8")
         size = full_path.stat().st_size if full_path.exists() else 0
         logger.info("File created: %s (%d bytes)", full_path, size)
@@ -249,7 +237,6 @@ async def create_file(payload: CreateFileRequest = Body(...)):
     summary="Replace file contents",
 )
 async def update_file(payload: UpdateFileRequest = Body(...)):
-    # Security: resolve and validate path
     try:
         full_path = _resolve_safe(Path(payload.path))
     except HTTPException:
@@ -298,23 +285,18 @@ async def patch_file(payload: PatchFileRequest = Body(...)):
         logger.warning("Empty diff in patch payload for: %s", resolved)
         raise HTTPException(status_code=400, detail="Empty diff")
 
-    # Read current file content
     try:
         original_text = resolved.read_text(encoding="utf-8")
     except Exception as e:
         logger.exception("Failed to read file for patching: %s", resolved)
         raise HTTPException(status_code=500, detail="Failed to read file")
 
-    # Handle JSON-escaped newlines
     if "\\n" in diff_text:
         diff_text = diff_text.replace("\\n", "\n")
 
-    # Apply the unified diff using difflib's patch functionality
     try:
-        # Parse the unified diff
         diff_lines = diff_text.splitlines(keepends=True)
 
-        # Validate this is a proper unified diff
         has_headers = False
         has_hunk = False
 
@@ -325,18 +307,12 @@ async def patch_file(payload: PatchFileRequest = Body(...)):
                 has_hunk = True
                 break
 
-        # For malformed diffs (missing headers), reject them
-        # A proper unified diff should have --- and +++ headers
         if not has_headers:
-            # Check if this is a malformed diff (just hunk without headers)
             if any(line.startswith("@@") for line in diff_lines):
-                # This is a malformed diff - reject it
                 raise HTTPException(
                     status_code=400, detail="Invalid diff format: missing headers"
                 )
 
-        # For non-targeted files, check if the filename in diff matches
-        # Extract filenames from diff headers
         source_file = None
         target_file = None
         for line in diff_lines:
@@ -346,27 +322,22 @@ async def patch_file(payload: PatchFileRequest = Body(...)):
                 target_file = line[4:].strip()
                 break
 
-        # Check if the diff targets a different file
         if (
             target_file
             and target_file != "b/" + file_path
             and target_file != "b/" + file_path.split("/")[-1]
         ):
-            # Check if it's targeting a different file explicitly
             if "other.md" in str(target_file) or "different.md" in str(target_file):
                 raise HTTPException(
                     status_code=400, detail="Diff targets different file"
                 )
 
-        # For malformed diffs without proper headers, reject
         if not has_headers and not any(line.startswith("@@") for line in diff_lines):
             raise HTTPException(
                 status_code=400, detail="Invalid diff format: missing headers"
             )
 
         try:
-            # The `whatthepatch.apply_diff` function expects the patch object
-            # and the source text. It returns a generator for the patched text.
             patch = next(whatthepatch.parse_patch(diff_text), None)
             if not patch:
                 raise HTTPException(status_code=400, detail="Invalid diff format")
@@ -385,7 +356,6 @@ async def patch_file(payload: PatchFileRequest = Body(...)):
         logger.exception("Failed to apply patch: %s", e)
         raise HTTPException(status_code=400, detail=f"Invalid diff format: {str(e)}")
 
-    # Write the patched content back to file
     try:
         resolved.write_text(new_text, encoding="utf-8")
         logger.info("File patched: %s", resolved)
@@ -393,7 +363,6 @@ async def patch_file(payload: PatchFileRequest = Body(...)):
         logger.exception("Failed to write patched file: %s", resolved)
         raise HTTPException(status_code=500, detail="Failed to write patched file")
 
-    # Calculate hash of new content
     new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
     return JSONResponse(
         content={"message": "patched", "etag": new_hash, "content": new_text},
@@ -456,7 +425,6 @@ class TrashRequest(BaseModel):
     summary="Move a file to the vault's .trash directory",
 )
 async def trash_file(payload: TrashRequest = Body(...)):
-    # Resolve and validate source path
     try:
         src = _resolve_safe(Path(payload.path))
     except HTTPException:
@@ -466,14 +434,12 @@ async def trash_file(payload: TrashRequest = Body(...)):
         logger.warning("Trash called but file not found: %s", src)
         raise HTTPException(status_code=404, detail="File not found")
 
-    # Destination is .trash/<relative path>
     trash_dir = VAULT_PATH / ".trash"
     vault_resolved = VAULT_PATH.resolve()
     dest = trash_dir / src.relative_to(vault_resolved)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Use atomic move
         src.replace(dest)
         logger.info("Moved file to trash: %s -> %s", src, dest)
     except Exception as e:
@@ -491,7 +457,6 @@ async def trash_file(payload: TrashRequest = Body(...)):
     summary="Permanently delete a file from the vault",
 )
 async def delete_file(payload: TrashRequest = Body(...)):
-    # Resolve and validate path
     try:
         target = _resolve_safe(Path(payload.path))
     except HTTPException:
@@ -547,7 +512,6 @@ def serve(config: str, log_file: str | None, log_level: str):
     """
     global VAULT_PATH, CONFIG
 
-    # Load configuration only from the explicit path provided via --config
     if not config or not os.path.isfile(config):
         click.echo(f"Config file not found: {config}", err=True)
         sys.exit(2)
@@ -555,10 +519,8 @@ def serve(config: str, log_file: str | None, log_level: str):
     with open(config, "r", encoding="utf-8") as f:
         CONFIG = yaml.safe_load(f) or {}
 
-    # Normalize daily_note: accept vault.daily_note or top-level daily_note
     CONFIG.setdefault("daily_note", CONFIG.get("vault", {}).get("daily_note", {}))
 
-    # Validate required sections
     server_cfg = CONFIG.get("server")
     vault_cfg = CONFIG.get("vault")
     if not server_cfg or not vault_cfg or "location" not in vault_cfg:
@@ -567,7 +529,6 @@ def serve(config: str, log_file: str | None, log_level: str):
         )
         sys.exit(2)
 
-    # Derive server values from config
     host = server_cfg.get("host")
     try:
         port = int(server_cfg.get("port"))
@@ -575,19 +536,15 @@ def serve(config: str, log_file: str | None, log_level: str):
         click.echo("Invalid 'port' in config; must be an integer", err=True)
         sys.exit(2)
 
-    # Vault path comes from config
     VAULT_PATH = Path(vault_cfg.get("location"))
 
-    # Configure logging
     numeric_level = getattr(logging, log_level.upper(), logging.INFO)
     logger.setLevel(numeric_level)
-    # Console handler
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(numeric_level)
     fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     ch.setFormatter(fmt)
     logger.addHandler(ch)
-    # Optional file handler
     if log_file:
         try:
             fh = logging.FileHandler(log_file, encoding="utf-8")
@@ -661,7 +618,6 @@ def mcp(spec: str, base_url: str | None, name: str, sse: bool, host: str, port: 
         )
         sys.exit(2)
 
-    # Load the OpenAPI spec from URL or local file
     if spec.startswith("http://") or spec.startswith("https://"):
         try:
             r = _httpx.get(spec)
@@ -678,10 +634,8 @@ def mcp(spec: str, base_url: str | None, name: str, sse: bool, host: str, port: 
             click.echo(f"Failed to read or parse spec file: {e}", err=True)
             sys.exit(2)
 
-    # Create async httpx client (use base_url if provided)
     client = _httpx.AsyncClient(base_url=base_url) if base_url else _httpx.AsyncClient()
 
-    # Create the MCP server from the OpenAPI spec
     try:
         mcp = _FastMCP.from_openapi(
             openapi_spec=openapi_spec,
@@ -704,7 +658,7 @@ def mcp(spec: str, base_url: str | None, name: str, sse: bool, host: str, port: 
         sys.exit(2)
 
     click.echo("Starting FastMCP server...")
-    # Run the server (blocking). By default use STDIO; if --sse was passed, use SSE transport
+
     try:
         if sse:
             click.echo(f"Using SSE transport on {host}:{port}")
@@ -719,4 +673,3 @@ def mcp(spec: str, base_url: str | None, name: str, sse: bool, host: str, port: 
 
 if __name__ == "__main__":
     main()
-
