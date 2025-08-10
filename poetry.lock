@@ -2103,7 +2103,19 @@ MarkupSafe = ">=2.1.1"
 [package.extras]
 watchdog = ["watchdog (>=2.3)"]
 
+[[package]]
+name = "whatthepatch"
+version = "1.0.7"
+description = "A patch parsing and application library."
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "whatthepatch-1.0.7-py3-none-any.whl", hash = "sha256:1b6f655fd31091c001c209529dfaabbabdbad438f5de14e3951266ea0fc6e7ed"},
+    {file = "whatthepatch-1.0.7.tar.gz", hash = "sha256:9eefb4ebea5200408e02d413d2b4bc28daea6b78bb4b4d53431af7245f7d7edf"},
+]
+
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<4.0"
-content-hash = "ed9baadbdef567834805b7d46d57b7414f292d531a021fc0eb7d7990b2af98e0"
+content-hash = "18f9426cfab482acbfc0747e03aeb92cb4b8a406e2215b94f39539320e0ec21f"

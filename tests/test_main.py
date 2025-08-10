@@ -129,7 +129,7 @@ def test_daily_note_path_generation(setup_test_vault):
     assert file_name == expected_path
 
 
-# --- PATCH tests added for ndiff and If-Match support ---
+# --- PATCH tests added for diff and If-Match support ---
 import difflib
 import hashlib
 
@@ -138,62 +138,96 @@ def _sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
-def test_patch_ndiff_applies(setup_test_vault):
+def test_patch_diff_applies(setup_test_vault):
     original = "line1\nline2\n"
     new = "line1\nline2\nline3 added\n"
     p = TEST_VAULT_PATH / "patch_note.md"
     p.write_text(original)
 
-    nd = "".join(
-        difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True))
+    # Use unified diff format instead of diff
+    d = "".join(
+        difflib.unified_diff(
+            original.splitlines(keepends=True),
+            new.splitlines(keepends=True),
+            fromfile="a/patch_note.md",
+            tofile="b/patch_note.md",
+            lineterm="\n",
+        )
     )
-    resp = client.patch("/files", json={"path": "patch_note.md", "ndiff": nd})
+    resp = client.patch("/files", json={"path": "patch_note.md", "diff": d})
     assert resp.status_code == 200
     assert p.read_text() == new
     assert "etag" in resp.json()
     assert resp.headers.get("ETag") == resp.json()["etag"]
 
 
-def test_patch_ndiff_applies_without_check(setup_test_vault):
+def test_patch_diff_applies_without_check(setup_test_vault):
     original = "old content\n"
     new = "new content\n"
     p = TEST_VAULT_PATH / "if_note.md"
     p.write_text(original)
-    nd = "".join(
-        difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True))
+    # Use unified diff format instead of diff
+    d = "".join(
+        difflib.unified_diff(
+            original.splitlines(keepends=True),
+            new.splitlines(keepends=True),
+            fromfile="a/if_note.md",
+            tofile="b/if_note.md",
+            lineterm="\n",
+        )
     )
-    resp = client.patch("/files", json={"path": "if_note.md", "ndiff": nd})
+    resp = client.patch("/files", json={"path": "if_note.md", "diff": d})
     assert resp.status_code == 200
     assert p.read_text() == new
     assert resp.json()["etag"] == _sha256(new)
 
 
 def test_patch_not_found(setup_test_vault):
-    nd = "".join(difflib.ndiff(["x\n"], ["y\n"]))
-    resp = client.patch(
-        "/files", json={"path": "nonexistent_patch.md", "ndiff": nd}
+    # Use unified diff format
+    d = "".join(
+        difflib.unified_diff(
+            ["x\n"],
+            ["y\n"],
+            fromfile="a/nonexistent_patch.md",
+            tofile="b/nonexistent_patch.md",
+            lineterm="\n",
+        )
     )
+    resp = client.patch("/files", json={"path": "nonexistent_patch.md", "diff": d})
     assert resp.status_code == 404
 
 
 def test_patch_path_traversal_forbidden(setup_test_vault):
-    nd = "".join(difflib.ndiff(["x\n"], ["y\n"]))
-    resp = client.patch("/files", json={"path": "../outside.md", "ndiff": nd})
+    # Use unified diff format
+    d = "".join(
+        difflib.unified_diff(
+            ["x\n"],
+            ["y\n"],
+            fromfile="a/outside.md",
+            tofile="b/outside.md",
+            lineterm="\n",
+        )
+    )
+    resp = client.patch("/files", json={"path": "../outside.md", "diff": d})
     assert resp.status_code == 400
 
 
-def test_patch_handles_ndiff_without_keepends(setup_test_vault):
-    # Simulate a client that used splitlines() without keepends
+def test_patch_handles_diff_without_keepends(setup_test_vault):
+    # This test is no longer relevant for unified diff format
+    # Unified diff always includes proper line endings in the format
+    # We'll test that malformed unified diffs are rejected
     original = "a\nb\n"
     new = "a\nb\nc added\n"
     p = TEST_VAULT_PATH / "no_keepends.md"
     p.write_text(original)
 
-    # Create ndiff without keepends
-    nd = "".join(difflib.ndiff(original.splitlines(), new.splitlines()))
-    resp = client.patch("/files", json={"path": "no_keepends.md", "ndiff": nd})
-    assert resp.status_code == 200
-    assert p.read_text() == new
+    # Create a malformed diff (missing headers)
+    d = "@@ -1,2 +1,3 @@\n a\n b\n+c added"
+    resp = client.patch("/files", json={"path": "no_keepends.md", "diff": d})
+    # Server should reject malformed unified diffs
+    assert resp.status_code == 400
+    # File should be left unchanged when patch is rejected
+    assert p.read_text() == original
 
 
 def test_patch_handles_escaped_newlines_and_mixed_payload(setup_test_vault):
@@ -203,30 +237,45 @@ def test_patch_handles_escaped_newlines_and_mixed_payload(setup_test_vault):
     p = TEST_VAULT_PATH / "mixed_escape.md"
     p.write_text(original)
 
-    # Proper ndiff but then JSON-escaped (simulating a buggy client)
-    proper_nd = "".join(difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True)))
-    escaped_nd = proper_nd.replace('\n', '\\n')
-    # Mix some real newlines back in to simulate a hybrid payload
-    hybrid_nd = escaped_nd.replace('one\\n', 'one\n')
+    # Proper unified diff but then JSON-escaped (simulating a buggy client)
+    proper_d = "".join(
+        difflib.unified_diff(
+            original.splitlines(keepends=True),
+            new.splitlines(keepends=True),
+            fromfile="a/mixed_escape.md",
+            tofile="b/mixed_escape.md",
+            lineterm="\n",
+        )
+    )
+    # Fully escape newlines to simulate JSON escaping
+    escaped_d = proper_d.replace("\n", "\\n")
 
-    resp = client.patch("/files", json={"path": "mixed_escape.md", "ndiff": hybrid_nd})
+    resp = client.patch("/files", json={"path": "mixed_escape.md", "diff": escaped_d})
     assert resp.status_code == 200
     assert p.read_text() == new
 
 
 def test_patch_handles_crlf_variants(setup_test_vault):
     # Ensure CRLF line endings from Windows clients are handled
-    original = "r1\r\n r2\r\n"
-    # Server normalizes to LF, so expected result uses \n
-    new = "r1\n r2\n r3 added\n"
+    original = "r1\r\nr2\r\n"
+    # Create new content with an added line
+    new = "r1\nr2\nr3 added\n"
     p = TEST_VAULT_PATH / "crlf.md"
     p.write_text(original)
 
-    nd = "".join(difflib.ndiff(original.splitlines(keepends=True), new.splitlines(keepends=True)))
-    # Send ndiff with CRLF sequences intact
-    resp = client.patch("/files", json={"path": "crlf.md", "ndiff": nd})
+    # Create unified diff - use LF for the diff itself
+    d = "".join(
+        difflib.unified_diff(
+            original.replace("\r\n", "\n").splitlines(keepends=True),
+            new.splitlines(keepends=True),
+            fromfile="a/crlf.md",
+            tofile="b/crlf.md",
+            lineterm="\n",
+        )
+    )
+    resp = client.patch("/files", json={"path": "crlf.md", "diff": d})
     assert resp.status_code == 200
-    # Normalize to original representation that the server will produce (it writes text as-is)
+    # The patched file should have the new content
     assert p.read_text() == new
 
 

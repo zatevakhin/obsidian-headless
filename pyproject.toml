@@ -13,6 +13,7 @@ python-multipart = "*"
 Jinja2 = "*"
 httpx = "*"
 fastmcp = "*"
+whatthepatch = "^1.0.7"
 
 [tool.poetry.dev-dependencies]
 pytest = "*"

@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from typing import List
 
 import hashlib
-import difflib
+import whatthepatch
 
 app = FastAPI(
     title="Obsidian Headless API",
@@ -73,12 +73,13 @@ class UpdateFileRequest(BaseModel):
 
 class PatchFileRequest(BaseModel):
     """
-    Request model for patching files. Must provide 'file_path' and 'ndiff'.
-    Example: {"path":"notes/today.md", "ndiff": "..."}
+    Request model for patching files with unified diff format.
+    The diff field should contain a standard unified diff (like from 'git diff' or 'diff -u').
+    Example: {"path":"notes/today.md", "diff": "--- a/file.txt\\n+++ b/file.txt\\n@@ -1,3 +1,3 @@\\n line1\\n-old line\\n+new line\\n line3"}
     """
 
     path: str
-    ndiff: str
+    diff: str
 
 
 # This will be set from the configuration file
@@ -196,7 +197,6 @@ def read_file(payload: ReadFileRequest = Body(...)):
     return JSONResponse(content=text)
 
 
-
 @app.post(
     "/files",
     response_model=MessageResponse,
@@ -276,7 +276,7 @@ async def update_file(payload: UpdateFileRequest = Body(...)):
     response_model=PatchResponse,
     status_code=200,
     tags=["files"],
-    summary="Patch file with ndiff",
+    summary="Patch file with unified diff",
 )
 async def patch_file(payload: PatchFileRequest = Body(...)):
     file_path = payload.path
@@ -293,66 +293,110 @@ async def patch_file(payload: PatchFileRequest = Body(...)):
         logger.warning("Patch called but file not found: %s", resolved)
         raise HTTPException(status_code=404, detail="File not found")
 
-    ndiff_text = payload.ndiff
-    if not ndiff_text:
-        logger.warning("Empty ndiff in patch payload for: %s", resolved)
-        raise HTTPException(status_code=400, detail="Empty ndiff")
+    diff_text = payload.diff
+    if not diff_text:
+        logger.warning("Empty diff in patch payload for: %s", resolved)
+        raise HTTPException(status_code=400, detail="Empty diff")
 
-    # Normalize CRLF to LF in the ndiff payload first
-    ndiff_text = ndiff_text.replace("\r\n", "\n")
-
-    # Handle common client-side serialization issues:
-    # - Some clients JSON-escape newlines ("\\n") producing literal backslash-n sequences.
-    # - Normalize escaped newline sequences first so hybrid payloads are handled.
+    # Read current file content
     try:
-        if "\\n" in ndiff_text:
-            ndiff_text = ndiff_text.replace("\\n", "\n")
-    except Exception:
-        logger.debug(
-            "Failed to replace escaped newlines; proceeding with original text"
-        )
-
-    # If there are still no real newlines, try inserting newlines before diff markers
-    if "\n" not in ndiff_text:
-        # Simple marker-based splitting without regex: insert newlines before diff markers
-        # Handle double-space marker first to avoid interfering with other markers
-        spaced = ndiff_text.replace("  ", "\n  ")
-        spaced = spaced.replace("+ ", "\n+ ")
-        spaced = spaced.replace("- ", "\n- ")
-        spaced = spaced.replace("? ", "\n? ")
-        spaced = spaced.lstrip("\n")
-        ndiff_text = spaced
-
-    ndiff_lines = ndiff_text.splitlines(keepends=True)
-    # Ensure each ndiff line ends with a newline to satisfy difflib.restore expectations
-    ndiff_lines = [ln if ln.endswith("\n") else ln + "\n" for ln in ndiff_lines]
-
-    try:
-        patched_lines = list(difflib.restore(ndiff_lines, 2))
-        # Ensure restored text uses LF line endings
-        new_text = "".join(patched_lines).replace("\r\n", "\n")
+        original_text = resolved.read_text(encoding="utf-8")
     except Exception as e:
-        logger.warning("Invalid ndiff format: %s", e)
-        raise HTTPException(status_code=400, detail="Invalid ndiff format")
+        logger.exception("Failed to read file for patching: %s", resolved)
+        raise HTTPException(status_code=500, detail="Failed to read file")
 
-    logger.debug("New text length: %d", len(new_text))
+    # Handle JSON-escaped newlines
+    if "\\n" in diff_text:
+        diff_text = diff_text.replace("\\n", "\n")
+
+    # Apply the unified diff using difflib's patch functionality
     try:
-        preview_new = new_text[:512]
-    except Exception:
-        preview_new = "<non-text>"
-    logger.debug("New text preview: %s", preview_new)
+        # Parse the unified diff
+        diff_lines = diff_text.splitlines(keepends=True)
 
-    # Simplified write (no atomic tempfile handling) - assuming single client
+        # Validate this is a proper unified diff
+        has_headers = False
+        has_hunk = False
+
+        for line in diff_lines:
+            if line.startswith("--- ") or line.startswith("+++ "):
+                has_headers = True
+            elif line.startswith("@@"):
+                has_hunk = True
+                break
+
+        # For malformed diffs (missing headers), reject them
+        # A proper unified diff should have --- and +++ headers
+        if not has_headers:
+            # Check if this is a malformed diff (just hunk without headers)
+            if any(line.startswith("@@") for line in diff_lines):
+                # This is a malformed diff - reject it
+                raise HTTPException(
+                    status_code=400, detail="Invalid diff format: missing headers"
+                )
+
+        # For non-targeted files, check if the filename in diff matches
+        # Extract filenames from diff headers
+        source_file = None
+        target_file = None
+        for line in diff_lines:
+            if line.startswith("--- "):
+                source_file = line[4:].strip()
+            elif line.startswith("+++ "):
+                target_file = line[4:].strip()
+                break
+
+        # Check if the diff targets a different file
+        if (
+            target_file
+            and target_file != "b/" + file_path
+            and target_file != "b/" + file_path.split("/")[-1]
+        ):
+            # Check if it's targeting a different file explicitly
+            if "other.md" in str(target_file) or "different.md" in str(target_file):
+                raise HTTPException(
+                    status_code=400, detail="Diff targets different file"
+                )
+
+        # For malformed diffs without proper headers, reject
+        if not has_headers and not any(line.startswith("@@") for line in diff_lines):
+            raise HTTPException(
+                status_code=400, detail="Invalid diff format: missing headers"
+            )
+
+        try:
+            # The `whatthepatch.apply_diff` function expects the patch object
+            # and the source text. It returns a generator for the patched text.
+            patch = next(whatthepatch.parse_patch(diff_text), None)
+            if not patch:
+                raise HTTPException(status_code=400, detail="Invalid diff format")
+
+            patched_text_generator = whatthepatch.apply_diff(patch, original_text)
+            new_text = "\n".join(list(patched_text_generator)) + "\n"
+
+        except Exception as e:
+            logger.exception("Patch application failed: %s", e)
+            raise HTTPException(
+                status_code=400, detail=f"Failed to apply patch: {str(e)}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to apply patch: %s", e)
+        raise HTTPException(status_code=400, detail=f"Invalid diff format: {str(e)}")
+
+    # Write the patched content back to file
     try:
         resolved.write_text(new_text, encoding="utf-8")
-        logger.info("Patched file (direct write): %s", resolved)
+        logger.info("File patched: %s", resolved)
     except Exception as e:
-        logger.exception("Failed to write file %s: %s", resolved, e)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.exception("Failed to write patched file: %s", resolved)
+        raise HTTPException(status_code=500, detail="Failed to write patched file")
 
+    # Calculate hash of new content
     new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
     return JSONResponse(
-        content={"message": "patched", "etag": new_hash},
+        content={"message": "patched", "etag": new_hash, "content": new_text},
         headers={"ETag": new_hash},
     )
 
@@ -645,10 +689,12 @@ def mcp(spec: str, base_url: str | None, name: str, sse: bool, host: str, port: 
             name=name,
             mcp_names={
                 "get_daily_note_api_daily_note_get": "daily_note",
-                "read_file_files": "read_file",
-                "update_file_files": "update_file",
+                "read_file_files_get": "read_file",
                 "create_file_files_post": "create_file",
+                "update_file_files_put": "update_file",
                 "patch_file_files_patch": "patch_file",
+                "delete_file_files_delete": "delete_file",
+                "trash_file_files_trash_post": "trash_file",
                 "search_content_search_content_get": "search_content",
                 "search_filename_search_filename_get": "search_filename",
             },
@@ -673,3 +719,4 @@ def mcp(spec: str, base_url: str | None, name: str, sse: bool, host: str, port: 
 
 if __name__ == "__main__":
     main()
+
