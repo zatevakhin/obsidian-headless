@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from pathlib import Path
 import shutil
 from datetime import datetime
-from main import app
+from obsidian_headless.main import app
 import yaml
 
 # Create a test vault for the tests
@@ -17,7 +17,7 @@ def setup_test_vault():
 
     # Set the global VAULT_PATH in the main module
     # This is a bit of a hack, but necessary for the current structure
-    import main
+    import obsidian_headless.main as main
 
     main.VAULT_PATH = TEST_VAULT_PATH
 
@@ -72,7 +72,7 @@ def test_get_daily_note_returns_existing_note():
 
 def test_daily_note_template_applied():
     """Verify that when a template is configured the created daily note contains rendered template content."""
-    import main
+    import obsidian_headless.main as main
 
     # Configure the daily_note to use the repo-level template we added
     main.CONFIG = {

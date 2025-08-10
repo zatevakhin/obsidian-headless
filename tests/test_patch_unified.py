@@ -4,7 +4,7 @@ import difflib
 from pathlib import Path
 import json
 
-import main
+import obsidian_headless.main as main
 
 client = TestClient(main.app)
 

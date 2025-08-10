@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from pathlib import Path
 import shutil
 from datetime import datetime
-from main import app, VAULT_PATH
+from obsidian_headless.main import app, VAULT_PATH
 
 # Create a test vault for the tests
 TEST_VAULT_PATH = Path("test_vault_for_tests")
@@ -19,7 +19,7 @@ def setup_test_vault():
 
     # Set the global VAULT_PATH in the main module
     # This is a bit of a hack, but necessary for the current structure
-    import main
+    import obsidian_headless.main as main
 
     main.VAULT_PATH = TEST_VAULT_PATH
 
@@ -111,7 +111,7 @@ def test_daily_note_path_generation(setup_test_vault):
     """
     config_path = TEST_VAULT_PATH / "config.yaml"
     config_path.write_text(config_content)
-    import main
+    import obsidian_headless.main as main
 
     with open(config_path, "r") as f:
         main.CONFIG = yaml.safe_load(f)

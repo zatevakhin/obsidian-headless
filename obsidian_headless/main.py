@@ -142,8 +142,15 @@ def get_daily_note():
         if template_path:
             tpl_candidate = Path(template_path)
             if not tpl_candidate.is_absolute():
-                repo_root = Path(__file__).resolve().parent
-                tpl_candidate = repo_root / template_path
+                # Try package-local template first, then repo root
+                pkg_dir = Path(__file__).resolve().parent
+                repo_root = pkg_dir.parent
+                candidate_pkg = pkg_dir / template_path
+                candidate_repo = repo_root / template_path
+                if candidate_pkg.is_file():
+                    tpl_candidate = candidate_pkg
+                else:
+                    tpl_candidate = candidate_repo
 
             if tpl_candidate.is_file():
                 tpl_text = tpl_candidate.read_text()
