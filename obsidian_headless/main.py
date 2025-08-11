@@ -572,16 +572,10 @@ def serve(config: str, log_file: str | None, log_level: str):
 
 @main.command()
 @click.option(
-    "--spec",
-    "-s",
-    required=True,
-    help="OpenAPI spec URL or local file (http(s):// or path)",
-)
-@click.option(
     "--base-url",
     "-b",
-    default=None,
-    help="Base URL for the API (optional)",
+    required=True,
+    help="Base URL for the API (e.g., http://localhost:42069)",
 )
 @click.option(
     "--name",
@@ -605,15 +599,18 @@ def serve(config: str, log_file: str | None, log_level: str):
     type=int,
     help="Port to bind when using SSE transport",
 )
-def mcp(spec: str, base_url: str | None, name: str, sse: bool, host: str, port: int):
+def mcp(base_url: str, name: str, sse: bool, host: str, port: int):
     """Create and run a FastMCP server from an OpenAPI spec (basic example).
 
     This implements the minimal example from the FastMCP OpenAPI docs:
-    - Load the OpenAPI spec (URL or local file)
+    - Automatically derive OpenAPI spec from base URL by appending /openapi.json
     - Create an httpx.AsyncClient
     - Call FastMCP.from_openapi(...)
     - Run the MCP server using STDIO (default) or SSE (when --sse is provided)
     """
+    # TODO: Cleanup on new versions of FastMCP
+    os.environ["FASTMCP_EXPERIMENTAL_ENABLE_NEW_OPENAPI_PARSER"] = "true"
+
     try:
         import json as _json
         import httpx as _httpx
@@ -625,23 +622,21 @@ def mcp(spec: str, base_url: str | None, name: str, sse: bool, host: str, port: 
         )
         sys.exit(2)
 
-    if spec.startswith("http://") or spec.startswith("https://"):
-        try:
-            r = _httpx.get(spec)
-            r.raise_for_status()
-            openapi_spec = r.json()
-        except Exception as e:
-            click.echo(f"Failed to download or parse spec: {e}", err=True)
-            sys.exit(2)
-    else:
-        try:
-            with open(spec, "r", encoding="utf-8") as f:
-                openapi_spec = _json.load(f)
-        except Exception as e:
-            click.echo(f"Failed to read or parse spec file: {e}", err=True)
-            sys.exit(2)
+    # Ensure base_url ends without trailing slash for consistent URL construction
+    base_url = base_url.rstrip("/")
+    spec_url = f"{base_url}/openapi.json"
 
-    client = _httpx.AsyncClient(base_url=base_url) if base_url else _httpx.AsyncClient()
+    try:
+        r = _httpx.get(spec_url)
+        r.raise_for_status()
+        openapi_spec = r.json()
+    except Exception as e:
+        click.echo(
+            f"Failed to download or parse OpenAPI spec from {spec_url}: {e}", err=True
+        )
+        sys.exit(2)
+
+    client = _httpx.AsyncClient(base_url=base_url)
 
     try:
         mcp = _FastMCP.from_openapi(
